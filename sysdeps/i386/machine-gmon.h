@@ -29,7 +29,8 @@
 /* We must not pollute the global namespace.  */
 #define mcount_internal __mcount_internal
 
-extern void mcount_internal (u_long frompc, u_long selfpc) internal_function;
+extern void mcount_internal (u_long frompc, u_long selfpc)
+  internal_function attribute_hidden;
 
 #define _MCOUNT_DECL(frompc, selfpc) \
 void internal_function mcount_internal (u_long frompc, u_long selfpc)
