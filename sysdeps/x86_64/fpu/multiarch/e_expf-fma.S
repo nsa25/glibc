@@ -1,6 +1,5 @@
-/* Optimized __ieee754_expf function.
-   Copyright (C) 2012-2017 Free Software Foundation, Inc.
-   Contributed by Intel Corporation.
+/* FMA/AVX2 version of IEEE 754 expf.
+   Copyright (C) 2017 Free Software Foundation, Inc.
    This file is part of the GNU C Library.
 
    The GNU C Library is free software; you can redistribute it and/or
@@ -44,20 +43,20 @@
  *  expf(x) underflows if x<-103.972076416015620
  */
 
-	.text
-ENTRY(__ieee754_expf)
+	.section .text.fma,"ax",@progbits
+ENTRY(__ieee754_expf_fma)
 	/* Input: single precision x in %xmm0 */
-	cvtss2sd	%xmm0, %xmm1	/* Convert x to double precision */
-	movd	%xmm0, %ecx		/* Copy x */
-	movsd	L(DP_KLN2)(%rip), %xmm2	/* DP K/log(2) */
-	movsd	L(DP_P2)(%rip), %xmm3	/* DP P2 */
+	vcvtss2sd %xmm0, %xmm0, %xmm1	/* Convert x to double precision */
+	vmovd	%xmm0, %ecx		/* Copy x */
+	vmovsd	L(DP_KLN2)(%rip), %xmm2	/* DP K/log(2) */
+	vfmadd213sd L(DP_RD)(%rip), %xmm1, %xmm2 /* DP x*K/log(2)+RD */
+	vmovsd	L(DP_P2)(%rip), %xmm3	/* DP P2 */
 	movl	%ecx, %eax		/* x */
-	mulsd	%xmm1, %xmm2		/* DP x*K/log(2) */
 	andl	$0x7fffffff, %ecx	/* |x| */
 	lea	__ieee754_expf_dp_table(%rip), %rsi/* address of table T[j] */
+	vmovsd	L(DP_P3)(%rip), %xmm4	/* DP P3 */
+
 	cmpl	$0x42ad496b, %ecx	/* |x|<125*log(2) ? */
-	movsd	L(DP_P3)(%rip), %xmm4	/* DP P3 */
-	addsd	L(DP_RS)(%rip), %xmm2	/* DP x*K/log(2)+RS */
 	jae	L(special_paths)
 
 	/* Here if |x|<125*log(2) */
@@ -65,42 +64,37 @@ ENTRY(__ieee754_expf)
 	jb	L(small_arg)
 
 	/* Main path: here if 2^(-28)<=|x|<125*log(2) */
-	cvtsd2ss	%xmm2, %xmm2	/* SP x*K/log(2)+RS */
-	movd	%xmm2, %eax		/* bits of n*K+j with trash */
-	subss	L(SP_RS)(%rip), %xmm2	/* SP t=round(x*K/log(2)) */
-	movl	%eax, %edx		/* n*K+j with trash */
-	cvtss2sd	%xmm2, %xmm2	/* DP t */
-	andl	$0x3f, %eax		/* bits of j */
-	mulsd	L(DP_NLN2K)(%rip), %xmm2/* DP -t*log(2)/K */
-	andl	$0xffffffc0, %edx	/* bits of n */
-#ifdef __AVX__
-	vaddsd	%xmm1, %xmm2, %xmm0	/* DP y=x-t*log(2)/K */
-	vmulsd	%xmm0, %xmm0, %xmm2	/* DP z=y*y */
-#else
-	addsd	%xmm1, %xmm2		/* DP y=x-t*log(2)/K */
-	movaps	%xmm2, %xmm0		/* DP y */
-	mulsd	%xmm2, %xmm2		/* DP z=y*y */
-#endif
-	mulsd	%xmm2, %xmm4		/* DP P3*z */
-	addl	$0x1fc0, %edx		/* bits of n + SP exponent bias */
-	mulsd	%xmm2, %xmm3		/* DP P2*z */
-	shll	$17, %edx		/* SP 2^n */
-	addsd	L(DP_P1)(%rip), %xmm4	/* DP P3*z+P1 */
-	addsd	L(DP_P0)(%rip), %xmm3	/* DP P2*z+P0 */
-	movd	%edx, %xmm1		/* SP 2^n */
-	mulsd	%xmm2, %xmm4		/* DP (P3*z+P1)*z */
-	mulsd	%xmm3, %xmm0		/* DP (P2*z+P0)*y */
-	addsd	%xmm4, %xmm0		/* DP P(y) */
-	mulsd	(%rsi,%rax,8), %xmm0	/* DP P(y)*T[j] */
-	addsd	(%rsi,%rax,8), %xmm0	/* DP T[j]*(P(y)+1) */
-	cvtsd2ss	%xmm0, %xmm0	/* SP T[j]*(P(y)+1) */
-	mulss	%xmm1, %xmm0		/* SP result=2^n*(T[j]*(P(y)+1)) */
+						/* %xmm2 = SP x*K/log(2)+RS */
+	vmovd	  %xmm2, %eax
+	vsubsd	  L(DP_RD)(%rip), %xmm2, %xmm2 	/* DP t=round(x*K/log(2)) */
+	movl	  %eax, %edx			/* n*K+j with trash */
+	andl	  $0x3f, %eax			/* bits of j */
+	vmovsd	  (%rsi,%rax,8), %xmm5		/* T[j] */
+	andl	  $0xffffffc0, %edx		/* bits of n */
+
+	vfmadd132sd  L(DP_NLN2K)(%rip), %xmm1, %xmm2 /*  DP y=x-t*log(2)/K */
+	vmulsd	    %xmm2, %xmm2, %xmm6		/* DP z=y*y */
+
+
+	vfmadd213sd L(DP_P1)(%rip), %xmm6, %xmm4 /* DP P3*z + P1 */
+	vfmadd213sd L(DP_P0)(%rip), %xmm6, %xmm3 /* DP P2*z+P0 */
+
+	addl	    $0x1fc0, %edx		/* bits of n + SP exponent bias */
+	shll	    $17, %edx			/* SP 2^n */
+	vmovd       %edx, %xmm1			/* SP 2^n */
+
+	vmulsd      %xmm6, %xmm4, %xmm4		/* DP (P3*z+P1)*z */
+
+	vfmadd213sd %xmm4, %xmm3, %xmm2		/* DP P(Y)  (P2*z+P0)*y */
+	vfmadd213sd %xmm5, %xmm5, %xmm2		/* DP T[j]*(P(y)+1) */
+	vcvtsd2ss   %xmm2, %xmm2, %xmm0		/* SP T[j]*(P(y)+1) */
+	vmulss	    %xmm1, %xmm0, %xmm0		/* SP result=2^n*(T[j]*(P(y)+1)) */
 	ret
 
 	.p2align	4
 L(small_arg):
 	/* Here if 0<=|x|<2^(-28) */
-	addss	L(SP_ONE)(%rip), %xmm0	/* 1.0 + x */
+	vaddss	L(SP_ONE)(%rip), %xmm0, %xmm0	/* 1.0 + x */
 	/* Return 1.0 with inexact raised, except for x==0 */
 	ret
 
@@ -117,19 +111,19 @@ L(special_paths):
 	jae	L(arg_inf_or_nan)
 
 	/* Here if |x|>under/overflow bound, and x is finite */
-	testq	%rax, %rax		/* sign of x nonzero ? */
+	testl	%eax, %eax		/* sign of x nonzero ? */
 	je	L(res_overflow)
 
 	/* Here if -inf<x<underflow bound (x<0) */
-	movss	L(SP_SMALL)(%rip), %xmm0/* load small value 2^(-100) */
-	mulss	%xmm0, %xmm0		/* Return underflowed result (zero or subnormal) */
+	vmovss	L(SP_SMALL)(%rip), %xmm0/* load small value 2^(-100) */
+	vmulss	%xmm0, %xmm0, %xmm0	/* Return underflowed result (zero or subnormal) */
 	ret
 
 	.p2align	4
 L(res_overflow):
 	/* Here if overflow bound<x<inf (x>0) */
-	movss	L(SP_LARGE)(%rip), %xmm0/* load large value 2^100 */
-	mulss	%xmm0, %xmm0		/* Return overflowed result (Inf or max normal) */
+	vmovss	L(SP_LARGE)(%rip), %xmm0/* load large value 2^100 */
+	vmulss	%xmm0, %xmm0, %xmm0	/* Return overflowed result (Inf or max normal) */
 	ret
 
 	.p2align	4
@@ -139,123 +133,39 @@ L(arg_inf_or_nan):
 
 	/* Here if |x| is Inf */
 	lea	L(SP_INF_0)(%rip), %rdx	/* depending on sign of x: */
-	movss	(%rdx,%rax,4), %xmm0	/* return zero or Inf */
+	vmovss	(%rdx,%rax,4), %xmm0	/* return zero or Inf */
 	ret
 
 	.p2align	4
 L(arg_nan):
 	/* Here if |x| is NaN */
-	addss	%xmm0, %xmm0		/* Return x+x (raise invalid) */
+	vaddss	%xmm0, %xmm0, %xmm0	/* Return x+x (raise invalid) */
 	ret
 
 	.p2align	4
 L(near_under_or_overflow):
 	/* Here if 125*log(2)<=|x|<under/overflow bound */
-	cvtsd2ss	%xmm2, %xmm2	/* SP x*K/log(2)+RS */
-	movd	%xmm2, %eax		/* bits of n*K+j with trash */
-	subss	L(SP_RS)(%rip), %xmm2	/* SP t=round(x*K/log(2)) */
+	vmovd	%xmm2, %eax		/* bits of n*K+j with trash */
+	vsubsd	L(DP_RD)(%rip), %xmm2, %xmm2 	/* DP t=round(x*K/log(2)) */
 	movl	%eax, %edx		/* n*K+j with trash */
-	cvtss2sd	%xmm2, %xmm2	/* DP t */
 	andl	$0x3f, %eax		/* bits of j */
-	mulsd	L(DP_NLN2K)(%rip), %xmm2/* DP -t*log(2)/K */
+	vmulsd	L(DP_NLN2K)(%rip),%xmm2, %xmm2/* DP -t*log(2)/K */
 	andl	$0xffffffc0, %edx	/* bits of n */
-#ifdef __AVX__
 	vaddsd	%xmm1, %xmm2, %xmm0	/* DP y=x-t*log(2)/K */
 	vmulsd	%xmm0, %xmm0, %xmm2	/* DP z=y*y */
-#else
-	addsd	%xmm1, %xmm2		/* DP y=x-t*log(2)/K */
-	movaps	%xmm2, %xmm0		/* DP y */
-	mulsd	%xmm2, %xmm2		/* DP z=y*y */
-#endif
-	mulsd	%xmm2, %xmm4		/* DP P3*z */
 	addl	$0xffc0, %edx		/* bits of n + DP exponent bias */
-	mulsd	%xmm2, %xmm3		/* DP P2*z */
+	vfmadd213sd L(DP_P0)(%rip), %xmm2, %xmm3/* DP P2*z+P0 */
 	shlq	$46, %rdx		/* DP 2^n */
-	addsd	L(DP_P1)(%rip), %xmm4	/* DP P3*z+P1 */
-	addsd	L(DP_P0)(%rip), %xmm3	/* DP P2*z+P0 */
-	movd	%rdx, %xmm1		/* DP 2^n */
-	mulsd	%xmm2, %xmm4		/* DP (P3*z+P1)*z */
-	mulsd	%xmm3, %xmm0		/* DP (P2*z+P0)*y */
-	addsd	%xmm4, %xmm0		/* DP P(y) */
-	mulsd	(%rsi,%rax,8), %xmm0	/* DP P(y)*T[j] */
-	addsd	(%rsi,%rax,8), %xmm0	/* DP T[j]*(P(y)+1) */
-	mulsd	%xmm1, %xmm0		/* DP result=2^n*(T[j]*(P(y)+1)) */
-	cvtsd2ss	%xmm0, %xmm0	/* convert result to single precision */
+	vfmadd213sd L(DP_P1)(%rip), %xmm2, %xmm4/* DP P3*z+P1 */
+	vmovq	%rdx, %xmm1		/* DP 2^n */
+	vmulsd	%xmm2, %xmm4, %xmm4	/* DP (P3*z+P1)*z */
+	vfmadd213sd %xmm4, %xmm3, %xmm0	/* DP (P2*z+P0)*y */
+	vmovsd	(%rsi,%rax,8), %xmm2
+	vfmadd213sd %xmm2, %xmm2, %xmm0 /* DP T[j]*(P(y)+1) */
+	vmulsd	%xmm1, %xmm0, %xmm0	/* DP result=2^n*(T[j]*(P(y)+1)) */
+	vcvtsd2ss %xmm0, %xmm0, %xmm0	/* convert result to single precision */
 	ret
-END(__ieee754_expf)
-
-	.section .rodata, "a"
-	.p2align 3
-/* table of double precision values 2^(j/K) for j=[0..K-1] */
-	.hidden	__ieee754_expf_dp_table
-	.globl	__ieee754_expf_dp_table
-__ieee754_expf_dp_table:
-	.long	0x00000000, 0x3ff00000
-	.long	0x3e778061, 0x3ff02c9a
-	.long	0xd3158574, 0x3ff059b0
-	.long	0x18759bc8, 0x3ff08745
-	.long	0x6cf9890f, 0x3ff0b558
-	.long	0x32d3d1a2, 0x3ff0e3ec
-	.long	0xd0125b51, 0x3ff11301
-	.long	0xaea92de0, 0x3ff1429a
-	.long	0x3c7d517b, 0x3ff172b8
-	.long	0xeb6fcb75, 0x3ff1a35b
-	.long	0x3168b9aa, 0x3ff1d487
-	.long	0x88628cd6, 0x3ff2063b
-	.long	0x6e756238, 0x3ff2387a
-	.long	0x65e27cdd, 0x3ff26b45
-	.long	0xf51fdee1, 0x3ff29e9d
-	.long	0xa6e4030b, 0x3ff2d285
-	.long	0x0a31b715, 0x3ff306fe
-	.long	0xb26416ff, 0x3ff33c08
-	.long	0x373aa9cb, 0x3ff371a7
-	.long	0x34e59ff7, 0x3ff3a7db
-	.long	0x4c123422, 0x3ff3dea6
-	.long	0x21f72e2a, 0x3ff4160a
-	.long	0x6061892d, 0x3ff44e08
-	.long	0xb5c13cd0, 0x3ff486a2
-	.long	0xd5362a27, 0x3ff4bfda
-	.long	0x769d2ca7, 0x3ff4f9b2
-	.long	0x569d4f82, 0x3ff5342b
-	.long	0x36b527da, 0x3ff56f47
-	.long	0xdd485429, 0x3ff5ab07
-	.long	0x15ad2148, 0x3ff5e76f
-	.long	0xb03a5585, 0x3ff6247e
-	.long	0x82552225, 0x3ff66238
-	.long	0x667f3bcd, 0x3ff6a09e
-	.long	0x3c651a2f, 0x3ff6dfb2
-	.long	0xe8ec5f74, 0x3ff71f75
-	.long	0x564267c9, 0x3ff75feb
-	.long	0x73eb0187, 0x3ff7a114
-	.long	0x36cf4e62, 0x3ff7e2f3
-	.long	0x994cce13, 0x3ff82589
-	.long	0x9b4492ed, 0x3ff868d9
-	.long	0x422aa0db, 0x3ff8ace5
-	.long	0x99157736, 0x3ff8f1ae
-	.long	0xb0cdc5e5, 0x3ff93737
-	.long	0x9fde4e50, 0x3ff97d82
-	.long	0x82a3f090, 0x3ff9c491
-	.long	0x7b5de565, 0x3ffa0c66
-	.long	0xb23e255d, 0x3ffa5503
-	.long	0x5579fdbf, 0x3ffa9e6b
-	.long	0x995ad3ad, 0x3ffae89f
-	.long	0xb84f15fb, 0x3ffb33a2
-	.long	0xf2fb5e47, 0x3ffb7f76
-	.long	0x904bc1d2, 0x3ffbcc1e
-	.long	0xdd85529c, 0x3ffc199b
-	.long	0x2e57d14b, 0x3ffc67f1
-	.long	0xdcef9069, 0x3ffcb720
-	.long	0x4a07897c, 0x3ffd072d
-	.long	0xdcfba487, 0x3ffd5818
-	.long	0x03db3285, 0x3ffda9e6
-	.long	0x337b9b5f, 0x3ffdfc97
-	.long	0xe78b3ff6, 0x3ffe502e
-	.long	0xa2a490da, 0x3ffea4af
-	.long	0xee615a27, 0x3ffefa1b
-	.long	0x5b6e4540, 0x3fff5076
-	.long	0x819e90d8, 0x3fffa7c1
-	.type __ieee754_expf_dp_table, @object
-	ASM_SIZE_DIRECTIVE(__ieee754_expf_dp_table)
+END(__ieee754_expf_fma)
 
 	.section .rodata.cst8,"aM",@progbits,8
 	.p2align 3
@@ -275,6 +185,11 @@ L(DP_RS): /* double precision 2^23+2^22 */
 	.long	0x00000000, 0x41680000
 	.type L(DP_RS), @object
 	ASM_SIZE_DIRECTIVE(L(DP_RS))
+	.p2align 3
+L(DP_RD): /* double precision 2^52+2^51 */
+	.long	0x00000000, 0x43380000
+	.type L(DP_RD), @object
+	ASM_SIZE_DIRECTIVE(L(DP_RD))
 
 	.p2align 3
 L(DP_P3): /* double precision polynomial coefficient P3 */
@@ -338,5 +253,3 @@ L(SP_ONE): /* single precision 1.0 */
 	.long	0x3f800000
 	.type L(SP_ONE), @object
 	ASM_SIZE_DIRECTIVE(L(SP_ONE))
-
-strong_alias (__ieee754_expf, __expf_finite)
